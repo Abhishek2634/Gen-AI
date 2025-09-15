@@ -3,77 +3,61 @@ import json
 import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from dotenv import load_dotenv
 import google.generativeai as genai
+from google.cloud import secretmanager
 
-load_dotenv()
 app = Flask(__name__)
-CORS(app)
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+cors = CORS(app, resources={r"/api/*": {"origins": "https://ai-coach-final.web.app"}})
+
+# --- Load API Key from Secret Manager (This part is working) ---
+API_KEY = None
+try:
+    client = secretmanager.SecretManagerServiceClient()
+    project_id = os.environ.get("GCP_PROJECT_ID")
+    secret_name = "AI_COACH_API_KEY"
+    name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
+    response = client.access_secret_version(request={"name": name})
+    API_KEY = response.payload.data.decode("UTF-8")
+    genai.configure(api_key=API_KEY)
+    print("✅ Successfully loaded API Key from Secret Manager.")
+except Exception as e:
+    print(f"❌ FATAL: Could not load API Key from Secret Manager. Error: {e}")
 
 @app.route('/api/generate', methods=['POST'])
 def generate_career_advice():
     try:
-        data = request.get_json()
-        
-        # Extract all fields from your detailed frontend form
-        name = data.get('name', 'a student')
-        education_level = data.get('educationLevel', 'Not specified')
-        stream = data.get('stream', 'Not specified')
-        interests = data.get('interests', 'Not specified')
-        skills = data.get('skills', {})
-        experience = data.get('experience', 'Not specified')
-        career_goals = data.get('careerGoals', 'Not specified')
-        work_preference = data.get('workPreference', 'Not specified')
+        if not API_KEY:
+             return jsonify({"error": "API Key is not configured on the server."}), 500
 
-        # --- ADVANCED PROMPT V4 - RESILIENT AND ROBUST ---
+        profile_data = request.get_json()
+        
+        # --- FINAL, MOST ROBUST PROMPT (V5) ---
         prompt = f"""
-        Act as an expert, data-driven career coach from a top Indian institution like an IIM or IIT.
-        Your client is an Indian student with the following detailed profile:
-        - Name: {name}
-        - Education: {education_level}, {stream}
-        - Professional Experience: {experience}
-        - Passions & Interests: {interests}
-        - Career Goals: {career_goals}
-        - Preferred Work Environment: {work_preference}
-        - Self-assessed Skills: {json.dumps(skills)}
+        Your task is to act as an expert career coach. Based on the user profile below, generate three distinct career paths.
+        USER PROFILE: {json.dumps(profile_data)}
 
-        Your task is to generate three distinct and actionable career paths. You MUST return a valid JSON object and nothing else.
-        The JSON response must follow this exact structure.
-        
-        IMPORTANT: If for any reason you cannot generate three distinct paths (e.g., due to content restrictions or an unusual profile), you MUST still provide at least one or two sensible suggestions. DO NOT RETURN AN EMPTY "careerPaths" LIST. Prioritize providing some guidance over no guidance.
+        CRITICAL INSTRUCTION: Your entire response MUST be a single, valid JSON object. Do not include any text, explanation, or markdown formatting like ```json before or after the JSON object. Your response must start with `{{` and end with `}}`.
 
+        Use this exact JSON structure:
         {{
           "careerPaths": [
             {{
               "id": 1,
-              "title": "Career Path Title",
-              "description": "A compelling, one-sentence summary of this career path.",
-              "category": "A relevant category like 'Technology', 'Design', 'Analytics', 'Management', etc.",
-              "matchScore": "An integer from 70-100, representing how strongly this path matches the user's complete profile.",
-              "fitReason": "A detailed paragraph explaining WHY this is a great match, specifically referencing the user's interests, skills, and career goals.",
-              "salaryRange": "A realistic entry-to-mid level salary range in Indian Rupees (e.g., '₹8-15 LPA').",
-              "experienceLevel": "Typical experience needed (e.g., 'Entry to Mid-level').",
-              "growth": "A projected year-over-year growth percentage for this role in India (e.g., '+15%').",
-              "timeline": "An estimated timeline to become job-ready in months (e.g., '6-9M').",
-              "jobRoles": ["Specific Job Role 1", "Specific Job Role 2", "Full Stack Developer", "Mobile App Developer"],
-              "industryTrendsIndia": "Describe the current demand, key companies hiring, and future outlook for this career in the Indian market.",
-              "topSkills": ["Primary Skill", "Second Skill", "Third Skill", "Fourth Skill"],
-              "requiredSkills": {{
-                "core": ["Fundamental Skill 1", "Fundamental Skill 2"],
-                "specialized": ["Tech Skill A", "Software B", "Methodology C"],
-                "emerging": ["Future Skill X", "Future Skill Y"]
-              }},
-              "learningResources": [
-                {{ "title": "Specific Foundational Course Name", "platform": "Udemy/Coursera/NPTEL", "description": "A brief, one-sentence description of the course." }},
-                {{ "title": "Practical Project Idea", "platform": "Portfolio Project", "description": "A hands-on project idea tailored to their interests." }},
-                {{ "title": "Key Industry Certification", "platform": "e.g., Google, AWS, HubSpot", "description": "A recommended certification to boost their resume." }},
-                {{ "title": "Helpful YouTube Channel or Community", "platform": "YouTube/freeCodeCamp", "description": "A resource for continuous learning." }}
-              ],
-              "jobReadiness": {{
-                "resumeTips": ["Actionable resume tip 1, tailored to this role.", "Actionable resume tip 2."],
-                "interviewQuestions": ["A common technical or behavioral question for this role.", "Another relevant interview question."]
-              }}
+              "title": "...",
+              "description": "...",
+              "category": "...",
+              "matchScore": "...",
+              "fitReason": "...",
+              "salaryRange": "...",
+              "experienceLevel": "...",
+              "growth": "...",
+              "timeline": "...",
+              "jobRoles": ["...", "..."],
+              "industryTrendsIndia": "...",
+              "topSkills": ["...", "..."],
+              "requiredSkills": {{"core": ["..."], "specialized": ["..."], "emerging": ["..."]}},
+              "learningResources": [{{ "title": "...", "platform": "...", "description": "..." }}],
+              "jobReadiness": {{"resumeTips": ["..."], "interviewQuestions": ["..."]}}
             }}
           ]
         }}
@@ -82,27 +66,30 @@ def generate_career_advice():
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         
+        # --- NEW, BULLETPROOF ERROR HANDLING ---
+        # 1. Clean the response text aggressively.
         cleaned_text = re.sub(r'^```json\s*|\s*```$', '', response.text.strip(), flags=re.MULTILINE)
+
+        # 2. Try to parse the cleaned text.
+        json_response = json.loads(cleaned_text)
         
-        try:
-            json_response = json.loads(cleaned_text)
-            
-            # --- NEW: BACKEND SANITY CHECK ---
-            if not json_response.get("careerPaths"):
-                print("Warning: AI returned an empty or malformed 'careerPaths' list. This could be due to a safety filter.")
-                # To prevent a crash on the frontend, we ensure careerPaths is at least an empty list.
-                json_response["careerPaths"] = []
+        if not json_response.get("careerPaths"):
+            print("AI returned a valid JSON but with an empty 'careerPaths' list.")
+            json_response["careerPaths"] = []
 
-            print("AI Response generated and parsed successfully.")
-            return jsonify(json_response)
-            
-        except json.JSONDecodeError:
-            print(f"Error: AI did not return valid JSON. Response text: {response.text}")
-            return jsonify({"error": "The AI response was not in a valid format. Please try again."}), 500
-
+        print("✅ AI Response generated and successfully parsed.")
+        return jsonify(json_response)
+        
+    except json.JSONDecodeError as json_err:
+        # This block will now catch the error you were seeing!
+        print(f"🚨 CRITICAL: AI response was NOT valid JSON. Error: {json_err}")
+        print(f"--- AI Raw Response Text ---")
+        print(response.text)
+        print(f"--- End of AI Raw Response ---")
+        return jsonify({"error": "The AI returned data in an unexpected format. Please try rephrasing your input."}), 500
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
-        return jsonify({"error": "An unexpected server error occurred. Please check logs."}), 500
+        return jsonify({"error": "An unexpected server error occurred."}), 500
 
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
