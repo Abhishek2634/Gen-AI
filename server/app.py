@@ -7,54 +7,54 @@ import google.generativeai as genai
 from google.cloud import secretmanager
 
 app = Flask(__name__)
-cors = CORS(app, resources={r"/api/*": {"origins": "https://ai-coach-final.web.app"}})
+# Use a permissive CORS policy for robust connectivity
+cors = CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# --- Load API Key from Secret Manager (This part is working) ---
-API_KEY = None
-try:
-    client = secretmanager.SecretManagerServiceClient()
-    project_id = os.environ.get("GCP_PROJECT_ID")
-    secret_name = "AI_COACH_API_KEY"
-    name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
-    response = client.access_secret_version(request={"name": name})
-    API_KEY = response.payload.data.decode("UTF-8")
-    genai.configure(api_key=API_KEY)
-    print("✅ Successfully loaded API Key from Secret Manager.")
-except Exception as e:
-    print(f"❌ FATAL: Could not load API Key from Secret Manager. Error: {e}")
+# --- LAZY INITIALIZATION for the Gemini Model ---
+model = None
+
+def initialize_gemini():
+    """Initializes the Gemini model on the first request."""
+    global model
+    if model is None:
+        try:
+            client = secretmanager.SecretManagerServiceClient()
+            project_id = os.environ.get("GCP_PROJECT_ID")
+            secret_name = "AI_COACH_API_KEY"
+            name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            api_key = response.payload.data.decode("UTF-8")
+            
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            print("✅ Gemini AI initialized and model loaded: gemini-1.5-flash")
+        except Exception as e:
+            print(f"❌ FATAL: Could not initialize Gemini AI. Error: {e}")
+            raise
 
 @app.route('/api/generate', methods=['POST'])
 def generate_career_advice():
     try:
-        if not API_KEY:
-             return jsonify({"error": "API Key is not configured on the server."}), 500
+        # This will initialize the model only on the first request.
+        initialize_gemini()
+    except Exception as e:
+        return jsonify({"error": "Server failed to initialize the AI model. Check logs."}), 500
 
+    try:
         profile_data = request.get_json()
         
-        # --- FINAL, MOST ROBUST PROMPT (V5) ---
         prompt = f"""
-        Your task is to act as an expert career coach. Based on the user profile below, generate three distinct career paths.
-        USER PROFILE: {json.dumps(profile_data)}
-
-        CRITICAL INSTRUCTION: Your entire response MUST be a single, valid JSON object. Do not include any text, explanation, or markdown formatting like ```json before or after the JSON object. Your response must start with `{{` and end with `}}`.
-
+        Analyze this user profile: {json.dumps(profile_data)}.
+        Your task is to generate three career path recommendations.
+        CRITICAL RULE: Your response must be ONLY a valid JSON object that starts with `{{` and ends with `}}`. Do not add any other text or formatting.
+        The matchScore must be an integer between 70 and 100.
         Use this exact JSON structure:
         {{
           "careerPaths": [
             {{
-              "id": 1,
-              "title": "...",
-              "description": "...",
-              "category": "...",
-              "matchScore": "...",
-              "fitReason": "...",
-              "salaryRange": "...",
-              "experienceLevel": "...",
-              "growth": "...",
-              "timeline": "...",
-              "jobRoles": ["...", "..."],
-              "industryTrendsIndia": "...",
-              "topSkills": ["...", "..."],
+              "id": 1, "title": "...", "description": "...", "category": "...", "matchScore": "...", "fitReason": "...",
+              "salaryRange": "...", "experienceLevel": "...", "growth": "...", "timeline": "...",
+              "jobRoles": ["...", "..."], "industryTrendsIndia": "...", "topSkills": ["...", "..."],
               "requiredSkills": {{"core": ["..."], "specialized": ["..."], "emerging": ["..."]}},
               "learningResources": [{{ "title": "...", "platform": "...", "description": "..." }}],
               "jobReadiness": {{"resumeTips": ["..."], "interviewQuestions": ["..."]}}
@@ -62,33 +62,27 @@ def generate_career_advice():
           ]
         }}
         """
-
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
         
-        # --- NEW, BULLETPROOF ERROR HANDLING ---
-        # 1. Clean the response text aggressively.
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+
+        response = model.generate_content(prompt, safety_settings=safety_settings)
+        
+        if not response.text:
+            raise ValueError("AI returned an empty response, likely due to safety filters.")
+        
         cleaned_text = re.sub(r'^```json\s*|\s*```$', '', response.text.strip(), flags=re.MULTILINE)
+        ai_response = json.loads(cleaned_text)
 
-        # 2. Try to parse the cleaned text.
-        json_response = json.loads(cleaned_text)
+        print("Successfully generated AI response.")
+        return jsonify(ai_response)
         
-        if not json_response.get("careerPaths"):
-            print("AI returned a valid JSON but with an empty 'careerPaths' list.")
-            json_response["careerPaths"] = []
-
-        print("✅ AI Response generated and successfully parsed.")
-        return jsonify(json_response)
-        
-    except json.JSONDecodeError as json_err:
-        # This block will now catch the error you were seeing!
-        print(f"🚨 CRITICAL: AI response was NOT valid JSON. Error: {json_err}")
-        print(f"--- AI Raw Response Text ---")
-        print(response.text)
-        print(f"--- End of AI Raw Response ---")
-        return jsonify({"error": "The AI returned data in an unexpected format. Please try rephrasing your input."}), 500
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"🚨 An error occurred in /api/generate: {e}")
         return jsonify({"error": "An unexpected server error occurred."}), 500
 
 if __name__ == "__main__":

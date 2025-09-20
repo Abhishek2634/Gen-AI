@@ -1,8 +1,6 @@
 Flask
-python-dotenv
-google-generativeai
 Flask-Cors
 gunicorn
 google-cloud-secret-manager
-google-cloud-firestore
-uuid
+firebase-admin
+google-generativeai
